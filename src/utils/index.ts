@@ -5,7 +5,6 @@ import { CSV_FOLDER_PATH } from '../config'
 let fileCount = 1
 
 export const delay = (ms: number) => {
-  console.info(`Taking a ${ms / 1000}s break...`)
   return new Promise(res => setTimeout(res, ms))
 }
 
@@ -46,4 +45,25 @@ export async function writeToCSV(address: string, data: any[]): Promise<void> {
   fs.writeFileSync(filename, csv)
   fileCount++
   console.log(`✅ CSV Created for ${address} @ ${filename}`)
+}
+
+/**
+ * A generic mutex implementation using a binary semaphore
+ * @param mutex - An object containing the mutex flag that can be passed by reference
+ * @param operation - The async operation to perform under mutex protection
+ * @returns The result of the operation
+ */
+export async function withMutex<T>(
+  mutex: { value: boolean },
+  operation: () => Promise<T>
+): Promise<T> {
+  while (mutex.value) {
+    await delay(1000) // Wait if mutex is locked
+  }
+  mutex.value = true
+  try {
+    return await operation()
+  } finally {
+    mutex.value = false
+  }
 }
