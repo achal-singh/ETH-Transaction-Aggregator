@@ -1,7 +1,5 @@
 # Transaction Aggregator
 
-**CODE UPDATE** - Kindly pull the **`bullmq`** branch for the latest version. The **`bullmq`** branch implements [**BullMQ**](https://docs.bullmq.io/) to handle receipt fetching operations/jobs in a reliable way.
-
 A TypeScript application that fetches and processes Ethereum wallet transactions using the Alchemy SDK. The application retrieves both incoming and outgoing transactions, processes them in batches, and exports the data to CSV file(s).
 
 ## Features
