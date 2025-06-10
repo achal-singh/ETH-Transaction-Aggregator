@@ -25,5 +25,5 @@ export interface AssetTransfersParams {
 
 export interface TransactionBatch {
   transfers: any[]
-  pageKey: string | null
+  pageKey?: string
 }

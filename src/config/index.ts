@@ -3,10 +3,19 @@ import { Network } from 'alchemy-sdk'
 
 export const CSV_FOLDER_PATH = path.join(process.cwd(), 'csv')
 
+if (!process.env.ALCHEMY_API_KEY)
+  throw new Error('Missing required environment variable: ALCHEMY_API_KEY')
+
 export const ALCHEMY_CONFIG = {
   network: Network.ETH_MAINNET,
   apiKey: process.env.ALCHEMY_API_KEY
 } as const
+
+export const EXCLUDE_ZERO_VALUE_TXS = parseInt(
+  process.env.EXCLUDE_ZERO_VALUE_TXS || '1'
+) as number
+
+export const ORDER = parseInt(process.env.LATEST_TX_FIRST || '0')
 
 // The number of receipt fetching workers (child processes) to be deployed.
 export const MAX_RECEIPT_WORKERS = isNaN(

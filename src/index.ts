@@ -31,12 +31,14 @@ const registerUncaughtHandlers = (transactionService: TransactionService) => {
 ;(async () => {
   try {
     const address = addressArg.split('=')[1]
-    if (!isAddress(address)) throw new Error('❌ Invalid Address entered!')
+    if (!isAddress(address)) {
+      throw new Error('❌ Invalid Address entered!')
+    }
 
     // awaiting constructor call so that workers get deployed first
     const transactionService = await createTransactionService(address)
     registerUncaughtHandlers(transactionService)
-    await transactionService.init({})
+    await transactionService.init()
   } catch (error) {
     console.error('Error in main execution:', error)
     process.exit(1)

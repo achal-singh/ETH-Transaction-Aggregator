@@ -1,19 +1,19 @@
-import * as ethers from 'ethers'
-import { Alchemy, Network, AssetTransfersCategory } from 'alchemy-sdk'
-import { ALCHEMY_CONFIG } from '../config'
 import {
-  AssetTransfersParams,
-  TransactionBatch,
-  FetchAllTransactionsParams
-} from '../types'
+  Alchemy,
+  Network,
+  AssetTransfersCategory,
+  SortingOrder
+} from 'alchemy-sdk'
+import { ALCHEMY_CONFIG, ORDER, EXCLUDE_ZERO_VALUE_TXS } from '../config'
+import { AssetTransfersParams, TransactionBatch } from '../types'
 import { QueueService } from './queueService'
 
 export class TransactionService {
   private alchemy: Alchemy
   private walletAddress: string
   queueService: QueueService
-  private incomingTxs: TransactionBatch = { transfers: [], pageKey: null }
-  private outgoingTxs: TransactionBatch = { transfers: [], pageKey: null }
+  private incomingTxs: TransactionBatch = { transfers: [] }
+  private outgoingTxs: TransactionBatch = { transfers: [] }
 
   constructor(address: string) {
     this.alchemy = new Alchemy({
@@ -21,9 +21,8 @@ export class TransactionService {
       network: Network.ETH_MAINNET
     })
     this.walletAddress = address
-    this.queueService = new QueueService(
-      `${address.slice(0, 7)}...${address.slice(-5)}`
-    )
+    this.queueService = new QueueService()
+    this.setupSignalHandlers()
   }
 
   /**
@@ -37,7 +36,7 @@ export class TransactionService {
   }: AssetTransfersParams) {
     const response = await this.alchemy.core.getAssetTransfers({
       [direction === 'incoming' ? 'toAddress' : 'fromAddress']: address,
-      excludeZeroValue: true,
+      excludeZeroValue: !!EXCLUDE_ZERO_VALUE_TXS,
       category: [
         AssetTransfersCategory.EXTERNAL,
         AssetTransfersCategory.INTERNAL,
@@ -45,14 +44,42 @@ export class TransactionService {
         AssetTransfersCategory.ERC721,
         AssetTransfersCategory.ERC1155
       ],
+      order: !!ORDER ? SortingOrder.DESCENDING : SortingOrder.ASCENDING,
       withMetadata: true,
       pageKey
     })
+    return response
+  }
 
-    return {
-      transfers: response.transfers,
-      pageKey: response.pageKey ?? null
-    }
+  private async addJobToReceiptQueue(address: string) {
+    await this.queueService.addReceiptJob({
+      address,
+      transactions: [
+        ...this.incomingTxs.transfers,
+        ...this.outgoingTxs.transfers
+      ]
+    })
+    this.incomingTxs.transfers = []
+    this.outgoingTxs.transfers = []
+  }
+
+  private async waitForJobsCompletion(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const onComplete = () => {
+        this.queueService.off('allJobsDone', onComplete)
+        this.queueService.off('error', onError)
+        resolve()
+      }
+      const onError = async (error: any) => {
+        this.queueService.off('allJobsDone', onComplete)
+        this.queueService.off('error', onError)
+        await this.queueService.close()
+        reject(error)
+      }
+
+      this.queueService.once('allJobsDone', onComplete)
+      this.queueService.once('error', onError)
+    })
   }
 
   /**
@@ -63,132 +90,93 @@ export class TransactionService {
    * @param nextPageForOutgoing - Boolean indicating if there is a next page for outgoing transactions
    * @param _pageKey - The page key reference to fetch the next page of transactions
    */
-  public async init({
-    nextPageForIncoming,
-    nextPageForOutgoing,
-    _pageKey
-  }: FetchAllTransactionsParams): Promise<void> {
+  public async init(): Promise<void> {
     try {
       const address = this.walletAddress
+      await this.queueService.init(
+        `${address.slice(0, 7)}...${address.slice(-5)}`
+      )
+      let hasMoreIncoming = true
+      let hasMoreOutgoing = true
 
-      if (_pageKey) {
-        // If the list of transactions returned is paginated.
-        if (nextPageForOutgoing) {
-          const res = await this.getAssetTransfers({
-            address,
-            direction: 'outgoing',
-            pageKey: _pageKey
-          })
+      console.info(`Fetching transactions linked to ${address}...`)
+      const [incomingRes, outgoingRes] = await Promise.all([
+        this.getAssetTransfers({ address, direction: 'incoming' }),
+        this.getAssetTransfers({ address, direction: 'outgoing' })
+      ])
 
-          this.outgoingTxs.transfers.push(...res.transfers)
-          this.outgoingTxs.pageKey = res.pageKey
-        }
-        if (nextPageForIncoming) {
+      this.incomingTxs = incomingRes
+      this.outgoingTxs = outgoingRes
+      console.info(
+        `Fetched total ${
+          this.incomingTxs.transfers.length + this.outgoingTxs.transfers.length
+        } transactions...`
+      )
+      hasMoreIncoming = !!incomingRes.pageKey
+      hasMoreOutgoing = !!outgoingRes.pageKey
+
+      await this.addJobToReceiptQueue(address)
+      await this.waitForJobsCompletion()
+
+      while (hasMoreIncoming || hasMoreOutgoing) {
+        if (this.incomingTxs.pageKey) {
+          console.info('\nFetching More Incoming Txs...')
           const res = await this.getAssetTransfers({
             address,
             direction: 'incoming',
-            pageKey: _pageKey
+            pageKey: this.incomingTxs.pageKey
           })
 
-          this.incomingTxs.transfers.push(...res.transfers)
-          this.incomingTxs.pageKey = res.pageKey
+          this.incomingTxs.transfers = res.transfers
+          this.incomingTxs.pageKey = res.pageKey ?? undefined
+          hasMoreIncoming = !!res.pageKey
+          console.info(
+            `Incoming Txs: ${this.incomingTxs.transfers.length} | ${
+              hasMoreIncoming ? 'More' : 'NO More'
+            } Incoming Txs to be fetched`
+          )
         }
-      } else {
-        // If the list of transactions returned is not paginated.
-        console.info(`Fetching transactions linked to ${address}...`)
-        ;[this.incomingTxs, this.outgoingTxs] = await Promise.all([
-          this.getAssetTransfers({ address, direction: 'incoming' }),
-          this.getAssetTransfers({ address, direction: 'outgoing' })
-        ])
+
+        if (this.outgoingTxs.pageKey) {
+          console.info('\nFetching More Outgoing Txs...')
+          const res = await this.getAssetTransfers({
+            address,
+            direction: 'outgoing',
+            pageKey: this.outgoingTxs.pageKey
+          })
+
+          this.outgoingTxs.transfers = res.transfers
+          this.outgoingTxs.pageKey = res.pageKey ?? undefined
+          hasMoreOutgoing = !!res.pageKey
+          console.info(
+            `Outgoing Txs: ${this.outgoingTxs.transfers.length}| ${
+              hasMoreOutgoing ? 'More' : 'NO More'
+            } Outgoing Txs to be fetched`
+          )
+        }
+
+        await this.addJobToReceiptQueue(address)
+        await this.waitForJobsCompletion()
       }
-
-      console.info(
-        `Incoming Txs: ${this.incomingTxs.transfers.length} | Outgoing Txs: ${
-          this.outgoingTxs.transfers.length
-        }.
-      ${this.incomingTxs.pageKey ? 'More Incoming Txs to be fetched' : ''} | ${
-          this.outgoingTxs.pageKey ? 'More Outgoing Txs to be fetched' : ''
-        }`
-      )
-
-      // Receipt-fetching jobs created for every 1,000 (or less) transactions
-      if (
-        this.incomingTxs.transfers.length + this.outgoingTxs.transfers.length >=
-        1000
-      ) {
-        await this.queueService.addJob({
-          address,
-          transactions: [
-            ...this.incomingTxs.transfers,
-            ...this.outgoingTxs.transfers
-          ]
-        })
-        this.incomingTxs.transfers = []
-        this.outgoingTxs.transfers = []
-      }
-
-      // Check if there are more pages for Incoming txs
-      if (this.incomingTxs.pageKey) {
-        await this.init({
-          _pageKey: this.incomingTxs.pageKey,
-          nextPageForIncoming: true
-        })
-        return
-      }
-
-      // Check if there are more pages for Outgoing txs
-      if (this.outgoingTxs.pageKey) {
-        await this.init({
-          _pageKey: this.outgoingTxs.pageKey,
-          nextPageForOutgoing: true
-        })
-        return
-      }
-
-      /** The following block is executed when it is needed to create receipt-fetching jobs for:
-       * 1. When total transactions (in entire history) < 1000.
-       * 2. When total transactions (in entire history) > 1000 and we're processing the last page of transactions.
-       */
-      if (
-        this.incomingTxs.transfers.length + this.outgoingTxs.transfers.length >
-        0
-      ) {
-        await this.queueService.addJob({
-          address,
-          transactions: [
-            ...this.incomingTxs.transfers,
-            ...this.outgoingTxs.transfers
-          ]
-        })
-        this.incomingTxs.transfers = []
-        this.outgoingTxs.transfers = []
-      } else {
-        console.info('-> No more transactions to fetch.')
-      }
-
-      // Wait for CSV Worker to complete its task, i.e. the last step.
-      await new Promise<void>((resolve, reject) => {
-        this.queueService.on('allJobsDone', async () => {
-          try {
-            await this.queueService.close()
-            console.info('🎉 All jobs processed.')
-            resolve()
-          } catch (error) {
-            reject(error)
-          }
-        })
-
-        // Handle unahandled errors during processing
-        this.queueService.on('error', async error => {
-          await this.queueService.close()
-          reject(error)
-        })
-      })
+      await this.queueService.close()
     } catch (error) {
       console.error('Error Occurred inside init(): ')
       console.error(error)
       await this.queueService.close()
-      throw error // Re-throw to handle it in the calling code
+      throw error
     }
+  }
+
+  setupSignalHandlers() {
+    const shutdown = async () => {
+      console.info(
+        '🛑 Received shutdown signal. Terminating Transaction Service...'
+      )
+      await this.queueService.close()
+      console.info('✅ Transaction Service Terminated.')
+      process.exit(0)
+    }
+    process.on('SIGTERM', shutdown)
+    process.on('SIGINT', shutdown)
   }
 }
